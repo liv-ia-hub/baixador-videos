@@ -38,6 +38,11 @@ SECRET_COOKIES = os.environ.get("COOKIES_FILE", "/etc/secrets/cookies.txt")
 WORK_COOKIES = os.path.join(DATA, "cookies.txt")
 IG = {"state": "missing"}   # missing | ok | expired
 
+# Com conversão: maior resolução primeiro (o que não for H.264 1080x1920 é convertido depois).
+# Sem conversão: H.264 primeiro, para abrir em qualquer lugar (o VP9 não abre no QuickTime do Mac).
+SORT_CONVERT = "res,vcodec:h264,acodec:aac"
+SORT_COMPAT = "vcodec:h264,res,acodec:aac"
+
 YTDLP = shutil.which("yt-dlp")
 FFMPEG = shutil.which("ffmpeg")
 
@@ -162,11 +167,12 @@ def convert_one(job, src, dstdir, it):
     cmd = [FFMPEG, "-nostdin", "-y", "-v", "error", "-threads", "1", "-filter_threads", "1",
            "-i", src, "-vf", VF,
            "-c:v", "libx264", "-threads", "1", "-x264-params", "rc-lookahead=10:sync-lookahead=0",
-           "-crf", "18", "-preset", "veryfast", "-pix_fmt", "yuv420p",
+           "-crf", "18", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
            "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart",
            "-progress", "pipe:1", "-nostats", tmp]
+    # prioridade baixa: o site continua respondendo enquanto converte
     p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                         universal_newlines=True, errors="replace")
+                         universal_newlines=True, errors="replace", preexec_fn=lambda: os.nice(10))
     job["proc"] = p
     for line in p.stdout:
         if line.startswith("out_time=") and dur > 0:
@@ -205,7 +211,7 @@ def run_job(job):
         before = video_files(catdir)
         cmd = [YTDLP, "--newline", "-o", os.path.join(catdir, "%(id)s.%(ext)s"),
                "--ffmpeg-location", FFMPEG, "--merge-output-format", "mp4",
-               "-S", "res,vcodec:h264,acodec:aac"]
+               "-S", SORT_CONVERT if job["convert"] else SORT_COMPAT]
         ck = prepare_cookies()
         if ck:
             cmd += ["--cookies", ck]
@@ -662,7 +668,7 @@ https://www.instagram.com/reel/CCCC/"></textarea>
       <label class="check">
         <input type="checkbox" id="convert" checked>
         <span>Converter para 1080x1920 (H.264)
-          <small>Aumenta os vídeos menores e converte para o formato recomendado pelo Meta. Os que já estão certos não perdem qualidade.</small></span>
+          <small>Aumenta os vídeos menores e converte para o formato recomendado pelo Meta. Os que já estão certos não perdem qualidade. Desmarcado é mais rápido: baixa a melhor versão em H.264, que abre em qualquer lugar (pode vir em 720x1280).</small></span>
       </label>
       <label class="f" for="sleep">Pausa entre vídeos (segundos)</label>
       <input type="number" id="sleep" value="3" min="0" max="60">
