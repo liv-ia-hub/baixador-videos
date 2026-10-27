@@ -34,6 +34,10 @@ TARGET_W, TARGET_H = 1080, 1920
 VF = ("scale=%d:%d:force_original_aspect_ratio=decrease:flags=lanczos,"
       "pad=%d:%d:(ow-iw)/2:(oh-ih)/2,setsar=1" % (TARGET_W, TARGET_H, TARGET_W, TARGET_H))
 
+SECRET_COOKIES = os.environ.get("COOKIES_FILE", "/etc/secrets/cookies.txt")
+WORK_COOKIES = os.path.join(DATA, "cookies.txt")
+IG = {"state": "missing"}   # missing | ok | expired
+
 YTDLP = shutil.which("yt-dlp")
 FFMPEG = shutil.which("ffmpeg")
 
@@ -84,12 +88,36 @@ def summarize(items):
     return {"count": len(items), "cats": [{"name": c, "n": counts[c]} for c in order]}
 
 
+def is_login_error(err):
+    e = (err or "").lower()
+    return ("empty media response" in e or "login" in e or "rate-limit" in e
+            or "rate limit" in e or "429" in e or "checkpoint" in e)
+
+
+def prepare_cookies():
+    """Copia o arquivo secreto (somente leitura) para uma cópia que o yt-dlp pode atualizar."""
+    try:
+        if os.path.isfile(SECRET_COOKIES) and os.path.getsize(SECRET_COOKIES) > 0:
+            if (not os.path.isfile(WORK_COOKIES)
+                    or os.path.getmtime(SECRET_COOKIES) > os.path.getmtime(WORK_COOKIES) + 1):
+                shutil.copyfile(SECRET_COOKIES, WORK_COOKIES)
+            if IG["state"] == "missing":
+                IG["state"] = "ok"
+            return WORK_COOKIES
+    except OSError:
+        pass
+    IG["state"] = "missing"
+    return None
+
+
 def friendly_error(err):
     e = (err or "").lower()
     if not e:
         return "Falhou (veja o registro técnico)"
-    if "login" in e or "rate-limit" in e or "rate limit" in e or "429" in e:
-        return "O Instagram bloqueou este vídeo por enquanto (pediu login). Tente de novo mais tarde."
+    if is_login_error(e):
+        if IG["state"] in ("ok", "expired"):
+            return "O login do Instagram do sistema expirou. Avise o responsável para renovar."
+        return "O Instagram bloqueou este vídeo (pediu login). Falta configurar o login do sistema."
     if "unsupported url" in e:
         return "Link não suportado"
     if "not available" in e or "unavailable" in e or "404" in e or "removed" in e or "private" in e:
@@ -173,7 +201,11 @@ def run_job(job):
         before = video_files(catdir)
         cmd = [YTDLP, "--newline", "-o", os.path.join(catdir, "%(id)s.%(ext)s"),
                "--ffmpeg-location", FFMPEG, "--merge-output-format", "mp4",
-               "-S", "res,vcodec:h264,acodec:aac", it["url"]]
+               "-S", "res,vcodec:h264,acodec:aac"]
+        ck = prepare_cookies()
+        if ck:
+            cmd += ["--cookies", ck]
+        cmd.append(it["url"])
         jlog(job, "▶ [%d/%d] %s" % (i + 1, len(items), it["url"]))
         err = ""
         p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -197,8 +229,12 @@ def run_job(job):
             it["status"] = "cancelado"
             break
         if rc != 0:
+            if ck and is_login_error(err) and "instagram" in it["url"].lower():
+                IG["state"] = "expired"
             it["status"], it["msg"] = "falhou", friendly_error(err)
             continue
+        if ck and "instagram" in it["url"].lower():
+            IG["state"] = "ok"
         files = sorted(video_files(catdir) - before)
         if not files and it["vid"]:
             files = sorted(f for f in video_files(catdir) if os.path.basename(f).startswith(it["vid"]))
@@ -389,7 +425,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(200, PAGE.encode("utf-8"), "text/html; charset=utf-8")
         if u.path == "/api/status":
             job = s.get("job")
-            out = {"job": None, "tools_ok": bool(YTDLP and FFMPEG)}
+            prepare_cookies()
+            out = {"job": None, "tools_ok": bool(YTDLP and FFMPEG), "ig": IG["state"]}
             if job:
                 with LOCK:
                     pos = list(QUEUE).index(job) + 1 if job in QUEUE else 0
@@ -574,6 +611,9 @@ pre{background:var(--field);border:1px solid var(--line);border-radius:10px;padd
 .hrow{display:flex;gap:10px;align-items:center;justify-content:space-between;padding:9px 0;border-bottom:1px solid var(--line);font-size:13.5px;flex-wrap:wrap}
 .hrow:last-child{border-bottom:0}
 .hrow .m{color:var(--muted);font-size:12.5px}
+.banner{border-radius:12px;padding:12px 14px;font-size:14px;margin-bottom:16px;border:1px solid}
+.banner.bad{background:var(--bad-soft);color:var(--bad);border-color:var(--bad)}
+.banner.info{background:var(--wait-soft);color:var(--muted);border-color:var(--line)}
 .hidden{display:none!important}
 .toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);background:var(--ink);color:var(--bg);padding:9px 16px;border-radius:10px;font-size:13.5px;opacity:0;transition:opacity .2s;pointer-events:none;max-width:90vw}
 .toast.show{opacity:1}
@@ -588,6 +628,8 @@ pre{background:var(--field);border:1px solid var(--line);border-radius:10px;padd
       <div><h1>Baixador de Vídeos</h1><div class="sub">Cole os links, baixe tudo num .zip separado por pastas</div></div>
     </div>
   </header>
+
+  <div class="banner hidden" id="igBanner"></div>
 
   <div class="grid">
     <div class="card">
@@ -694,7 +736,14 @@ $('#stopBtn').onclick = async () => { try{ await api('/api/stop', {}); toast('Pa
 const LABEL = {aguardando:'Aguardando', baixando:'Baixando', convertendo:'Convertendo', ok:'Pronto', falhou:'Falhou', cancelado:'Cancelado'};
 let last = null, savedFor = null;
 
+function renderIG(st){
+  const b = $('#igBanner');
+  if(st === 'expired'){ b.className = 'banner bad'; b.innerHTML = '<b>O login do Instagram do sistema expirou.</b> Os vídeos do Instagram vão falhar até o responsável renovar. Avise quem cuida do Baixador.'; }
+  else if(st === 'missing'){ b.className = 'banner info'; b.textContent = 'O login do Instagram do sistema ainda não foi configurado. Vídeos do Instagram podem falhar.'; }
+  else { b.className = 'banner hidden'; }
+}
 function render(s){
+  renderIG(s.ig);
   const job = s.job;
   const running = !!job && (job.state === 'queued' || job.state === 'running');
   $('#startBtn').disabled = running;
@@ -779,7 +828,7 @@ async function poll(){
   clearTimeout(pollT);
   try{
     const s = await api('/api/status');
-    const sig = JSON.stringify(s.job);
+    const sig = JSON.stringify([s.job, s.ig]);
     if(sig !== last){ last = sig; render(s); }
     const active = s.job && (s.job.state === 'queued' || s.job.state === 'running');
     pollT = setTimeout(poll, active ? 1000 : 5000);
