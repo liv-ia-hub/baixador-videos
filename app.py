@@ -157,8 +157,12 @@ def convert_one(job, src, dstdir, it):
         shutil.copy2(src, dst)
         return dst
     tmp = os.path.join(dstdir, base + ".convertendo.mp4")
-    cmd = [FFMPEG, "-nostdin", "-y", "-v", "error", "-i", src, "-vf", VF,
-           "-c:v", "libx264", "-crf", "18", "-preset", "veryfast", "-pix_fmt", "yuv420p",
+    # 1 thread: o plano grátis tem 512 MB de memória; sem limite o ffmpeg abre uma thread
+    # por processador da máquina e estoura a memória convertendo 1080x1920
+    cmd = [FFMPEG, "-nostdin", "-y", "-v", "error", "-threads", "1", "-filter_threads", "1",
+           "-i", src, "-vf", VF,
+           "-c:v", "libx264", "-threads", "1", "-x264-params", "rc-lookahead=10:sync-lookahead=0",
+           "-crf", "18", "-preset", "veryfast", "-pix_fmt", "yuv420p",
            "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart",
            "-progress", "pipe:1", "-nostats", tmp]
     p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
